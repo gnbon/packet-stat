@@ -26,10 +26,10 @@ struct Stat
 struct ether_key : public ether_addr {
     bool operator<(ether_key const& rhs) const {
         for (int i = 0; i < ETH_ALEN; i++) {
-		    if (ether_addr_octet[i] != rhs.ether_addr_octet[i]) {
-		        if (ether_addr_octet[i] < rhs.ether_addr_octet[i]) return true;
+            if (ether_addr_octet[i] != rhs.ether_addr_octet[i]) {
+                if (ether_addr_octet[i] < rhs.ether_addr_octet[i]) return true;
                 else return false;
-		    }
+            }
         }
         return false;
     }
@@ -39,7 +39,9 @@ struct EthStat {
     typedef std::map<ether_key, Stat> EthMap_t;
     EthMap_t EthMap;
 
-    void process_packet(const struct pcap_pkthdr *pkthdr, ether_header *eth) {
+    void process_packet(const struct pcap_pkthdr *pkthdr, const u_char* packet) {
+        auto eth = (ether_header *)packet;
+
         ether_key src, dst;
         EthMap_t::iterator iter;
 
@@ -72,7 +74,9 @@ struct IpStat {
     typedef std::map<uint32_t, Stat> IpMap_t;
     IpMap_t IpMap;
 
-    void process_packet(const struct pcap_pkthdr *pkthdr, ip *iph) {
+    void process_packet(const struct pcap_pkthdr *pkthdr, const u_char *packet) {
+        auto iph = (ip *)packet;
+
         uint32_t src = iph->ip_src.s_addr;
         uint32_t dst = iph->ip_dst.s_addr;
         IpMap_t::iterator iter;
@@ -99,30 +103,96 @@ struct IpStat {
     }
 };
 
+struct TcpStat {
+    typedef std::pair<uint32_t, uint16_t> TcpKey_t;
+    typedef std::map<std::pair<uint32_t, uint16_t>, Stat> TcpMap_t; // <<ip_address, port>, Stat>
+    TcpMap_t TcpMap;
+
+    void process_packet(const struct pcap_pkthdr *pkthdr, const u_char *packet) {
+        auto iph = (ip *)packet;
+        auto tcph = (tcphdr *)(packet + iph->ip_hl * 4);
+
+        TcpKey_t src = std::make_pair(iph->ip_src.s_addr, tcph->source);
+        TcpKey_t dst = std::make_pair(iph->ip_dst.s_addr, tcph->dest);
+        TcpMap_t::iterator iter;
+
+        iter = TcpMap.find(src);
+        if (iter == TcpMap.end()) iter = TcpMap.insert(std::make_pair(src, Stat())).first;
+        iter->second.tx_packet++;
+        iter->second.tx_byte += pkthdr->len;
+
+        iter = TcpMap.find(dst);
+        if (iter == TcpMap.end()) iter = TcpMap.insert(std::make_pair(dst, Stat())).first;
+        iter->second.rx_packet++;
+        iter->second.rx_byte += pkthdr->len;
+    }
+
+    void print_stat() {
+        for(auto iter = TcpMap.begin(); iter != TcpMap.end(); iter++) {
+            in_addr ip = {iter->first.first};
+            uint16_t tcp = iter->first.second;
+            Stat stat = iter->second;
+            
+            printf("ip addr: %s, tcp port: %d, ", inet_ntoa(ip), ntohs(tcp));
+            printf("tx_packet: %d, tx_byte: %d, rx_packet: %d, rx_byte: %d\n", stat.tx_packet, stat.tx_byte, stat.rx_packet, stat.rx_byte);
+        }
+    }
+};
+
+struct UdpStat {
+    typedef std::pair<uint32_t, uint16_t> UdpKey_t;
+    typedef std::map<std::pair<uint32_t, uint16_t>, Stat> UdpMap_t; // <<ip_address, port>, Stat>
+    UdpMap_t UdpMap;
+
+    void process_packet(const struct pcap_pkthdr *pkthdr, const u_char *packet) {
+        auto iph = (ip *)packet;
+        auto tcph = (tcphdr *)(packet + iph->ip_hl * 4);
+
+        UdpKey_t src = std::make_pair(iph->ip_src.s_addr, tcph->source);
+        UdpKey_t dst = std::make_pair(iph->ip_dst.s_addr, tcph->dest);
+        UdpMap_t::iterator iter;
+
+        iter = UdpMap.find(src);
+        if (iter == UdpMap.end()) iter = UdpMap.insert(std::make_pair(src, Stat())).first;
+        iter->second.tx_packet++;
+        iter->second.tx_byte += pkthdr->len;
+
+        iter = UdpMap.find(dst);
+        if (iter == UdpMap.end()) iter = UdpMap.insert(std::make_pair(dst, Stat())).first;
+        iter->second.rx_packet++;
+        iter->second.rx_byte += pkthdr->len;
+    }
+
+    void print_stat() {
+        for(auto iter = UdpMap.begin(); iter != UdpMap.end(); iter++) {
+            in_addr ip = {iter->first.first};
+            uint16_t udp = iter->first.second;
+            Stat stat = iter->second;
+            
+            printf("ip addr: %s, udp port: %d, ", inet_ntoa(ip), ntohs(udp));
+            printf("tx_packet: %d, tx_byte: %d, rx_packet: %d, rx_byte: %d\n", stat.tx_packet, stat.tx_byte, stat.rx_packet, stat.rx_byte);
+        }
+    }
+};
+
 IpStat ipstat;
 EthStat ethstat;
+TcpStat tcpstat;
+UdpStat udpstat;
 
 void callback_stat(unsigned char* useless, const struct pcap_pkthdr *pkthdr, const u_char *packet)
 {
-    auto eth = (ether_header *)packet;
-    ethstat.process_packet(pkthdr, eth);
+    ethstat.process_packet(pkthdr, packet);
 
-    if (ntohs(eth->ether_type) == ETHERTYPE_IP) {
+    if (ntohs(((ether_header *)packet)->ether_type) == ETHERTYPE_IP) {
         packet += sizeof(ether_header);
-        auto iph = (ip *)packet;
-        ipstat.process_packet(pkthdr, iph);
+        ipstat.process_packet(pkthdr, packet);
         
-        // if (iph->ip_p == IPPROTO_TCP) {
-        //     auto tcph = (struct tcphdr *)(packet + iph->ip_hl * 4);
-
-        // }
-
-        // if (iph->ip_p == IPPROTO_UDP) {
-        //     auto udph = (struct udphdr *)(packet + iph->ip_hl * 4);
-
-        // }
+        if (((ip *)packet)->ip_p == IPPROTO_TCP) 
+            tcpstat.process_packet(pkthdr, packet);
+        if (((ip *)packet)->ip_p == IPPROTO_UDP) 
+            udpstat.process_packet(pkthdr, packet);
     }
-
 }
 
 int main(int argc, char *argv[])
@@ -145,6 +215,8 @@ int main(int argc, char *argv[])
 
     ethstat.print_stat();    
     ipstat.print_stat();
+    tcpstat.print_stat();
+    udpstat.print_stat();
 
     pcap_close(pcd);
     return 0;
