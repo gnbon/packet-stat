@@ -13,82 +13,116 @@
 #include <arpa/inet.h>
 #include <pcap/pcap.h>
 
-struct PacketStatistics
+struct Stat
 {
-    int tx_packets;
-    int tx_bytes;
-    int rx_packets;
-    int rx_bytes;
+    int tx_packet;
+    int tx_byte;
+    int rx_packet;
+    int rx_byte;
 
-    PacketStatistics() {tx_packets = 0; tx_bytes = 0; rx_packets = 0; rx_bytes = 0;};
-    void print() {printf("tx_packets: %d, tx_bytes: %d, rx_packets: %d, rx_bytes: %d\n", tx_packets, tx_bytes, rx_packets, rx_bytes);};
+    Stat() {tx_packet = 0; tx_byte = 0; rx_packet = 0; rx_byte = 0;};
 };
 
-struct KeyMac {
-    uint8_t eth_addr[ETH_ALEN];
-
-    bool operator<(KeyMac const& other) const {
+struct ether_key : public ether_addr {
+    bool operator<(ether_key const& rhs) const {
         for (int i = 0; i < ETH_ALEN; i++) {
-		    if (eth_addr[i] != other.eth_addr[i]) {
-		        if (eth_addr[i] < other.eth_addr[i])
-                    return true;
-                else 
-                    return false;
+		    if (ether_addr_octet[i] != rhs.ether_addr_octet[i]) {
+		        if (ether_addr_octet[i] < rhs.ether_addr_octet[i]) return true;
+                else return false;
 		    }
         }
         return false;
     }
 };
 
-std::map<KeyMac, PacketStatistics> stat_mac;
-std::map<uint32_t, PacketStatistics> stat_ip;
+struct EthStat {
+    typedef std::map<ether_key, Stat> EthMap_t;
+    EthMap_t EthMap;
+
+    void process_packet(const struct pcap_pkthdr *pkthdr, ether_header *eth) {
+        ether_key src, dst;
+        EthMap_t::iterator iter;
+
+        memcpy(src.ether_addr_octet, eth->ether_shost, ETH_ALEN);
+        memcpy(dst.ether_addr_octet, eth->ether_dhost, ETH_ALEN);
+        
+        iter = EthMap.find(src);
+        if (iter == EthMap.end()) iter = EthMap.insert(std::make_pair(src, Stat())).first;
+        iter->second.tx_packet++;
+        iter->second.tx_byte += pkthdr->len;
+
+        iter = EthMap.find(dst);
+        if (iter == EthMap.end()) iter = EthMap.insert(std::make_pair(dst, Stat())).first;
+        iter->second.rx_packet++;
+        iter->second.rx_byte += pkthdr->len;
+    }
+
+    void print_stat() {
+        for(auto iter = EthMap.begin(); iter!=EthMap.end(); iter++) {
+            ether_addr *ethernet = (ether_addr *)iter->first.ether_addr_octet;
+            Stat stat = iter->second;        
+
+            printf("mac addr: %s, ", ether_ntoa(ethernet));
+            printf("tx_packet: %d, tx_byte: %d, rx_packet: %d, rx_byte: %d\n", stat.tx_packet, stat.tx_byte, stat.rx_packet, stat.rx_byte);
+        }   
+    }
+};
+
+struct IpStat {
+    typedef std::map<uint32_t, Stat> IpMap_t;
+    IpMap_t IpMap;
+
+    void process_packet(const struct pcap_pkthdr *pkthdr, ip *iph) {
+        uint32_t src = iph->ip_src.s_addr;
+        uint32_t dst = iph->ip_dst.s_addr;
+        IpMap_t::iterator iter;
+
+        iter = IpMap.find(src);
+        if (iter == IpMap.end()) iter = IpMap.insert(std::make_pair(src, Stat())).first;
+        iter->second.tx_packet++;
+        iter->second.tx_byte += pkthdr->len;
+
+        iter = IpMap.find(dst);
+        if (iter == IpMap.end()) iter = IpMap.insert(std::make_pair(dst, Stat())).first;
+        iter->second.rx_packet++;
+        iter->second.rx_byte += pkthdr->len;
+    }
+
+    void print_stat() {
+        for(auto iter = IpMap.begin(); iter != IpMap.end(); iter++) {
+            in_addr ip = {iter->first};
+            Stat stat = iter->second;
+            
+            printf("ip addr: %s, ", inet_ntoa(ip));
+            printf("tx_packet: %d, tx_byte: %d, rx_packet: %d, rx_byte: %d\n", stat.tx_packet, stat.tx_byte, stat.rx_packet, stat.rx_byte);
+        }
+    }
+};
+
+IpStat ipstat;
+EthStat ethstat;
 
 void callback_stat(unsigned char* useless, const struct pcap_pkthdr *pkthdr, const u_char *packet)
 {
-    PacketStatistics* stat_tmp = nullptr;
-    
     auto eth = (ether_header *)packet;
+    ethstat.process_packet(pkthdr, eth);
 
-    KeyMac src_mac;
-    KeyMac dst_mac;
-    memcpy(src_mac.eth_addr, eth->ether_shost, sizeof(ether_addr));
-    memcpy(dst_mac.eth_addr, eth->ether_dhost, sizeof(ether_addr));
+    if (ntohs(eth->ether_type) == ETHERTYPE_IP) {
+        packet += sizeof(ether_header);
+        auto iph = (ip *)packet;
+        ipstat.process_packet(pkthdr, iph);
+        
+        // if (iph->ip_p == IPPROTO_TCP) {
+        //     auto tcph = (struct tcphdr *)(packet + iph->ip_hl * 4);
 
-    auto iter_mac = stat_mac.find(src_mac);
+        // }
 
-    if (iter_mac == stat_mac.end()) 
-        iter_mac = stat_mac.insert(std::make_pair(src_mac, PacketStatistics())).first;
-    iter_mac->second.tx_packets++;
-    iter_mac->second.tx_bytes += pkthdr->len;
+        // if (iph->ip_p == IPPROTO_UDP) {
+        //     auto udph = (struct udphdr *)(packet + iph->ip_hl * 4);
 
-    iter_mac = stat_mac.find(dst_mac);
+        // }
+    }
 
-    if (iter_mac == stat_mac.end()) 
-        iter_mac = stat_mac.insert(std::make_pair(dst_mac, PacketStatistics())).first;
-    iter_mac->second.rx_packets++;
-    iter_mac->second.rx_bytes += pkthdr->len;
-
-    if (ntohs(eth->ether_type) != ETHERTYPE_IP)
-        return;
-    
-    packet += sizeof(ether_header);
-    auto iph = (ip *)packet;
-
-    in_addr_t src_ip = iph->ip_src.s_addr;
-    in_addr_t dst_ip = iph->ip_dst.s_addr;
-
-    auto iter_ip = stat_ip.find(src_ip);
-
-    if (iter_ip == stat_ip.end()) 
-        iter_ip = stat_ip.insert(std::make_pair(src_ip, PacketStatistics())).first;
-    iter_ip->second.tx_packets++;
-    iter_ip->second.tx_bytes += pkthdr->len;
-
-    iter_ip = stat_ip.find(dst_ip);
-    if (iter_ip == stat_ip.end()) 
-        iter_ip = stat_ip.insert(std::make_pair(dst_ip, PacketStatistics())).first;
-    iter_ip->second.rx_packets++;
-    iter_ip->second.rx_bytes += pkthdr->len;
 }
 
 int main(int argc, char *argv[])
@@ -109,18 +143,8 @@ int main(int argc, char *argv[])
 
     pcap_loop(pcd, 0, callback_stat, NULL);
 
-    for(auto iter_mac=stat_mac.begin(); iter_mac!=stat_mac.end(); iter_mac++) {
-        ether_addr ether;
-        memcpy(ether.ether_addr_octet, iter_mac->first.eth_addr, sizeof(ether_addr));
-        printf("mac addr: %s, ", ether_ntoa(&ether));
-        iter_mac->second.print();
-    }
-
-    for(auto iter_ip=stat_ip.begin(); iter_ip!=stat_ip.end(); iter_ip++) {
-        in_addr in = {iter_ip->first};
-        printf("ip addr: %s, ", inet_ntoa(in));
-        iter_ip->second.print();
-    }
+    ethstat.print_stat();    
+    ipstat.print_stat();
 
     pcap_close(pcd);
     return 0;
